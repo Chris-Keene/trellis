@@ -172,7 +172,7 @@ window (about 6MB of wheels; without it the app still runs in the browser).
 Optional: `./.venv/bin/pip install anthropic` and an exported `ANTHROPIC_API_KEY`
 let a source run use the Claude help without Claude Code. The packaged app does not
 include the `anthropic` package, so it only works through Claude Code; when both are
-present, Claude Code wins.
+present, Claude Code wins unless it is signed out.
 
 Optional but recommended: `brew install verapdf` for independent conformance
 validation. Without it the app still tags and exports, and says plainly that
