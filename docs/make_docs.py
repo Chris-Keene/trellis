@@ -194,6 +194,10 @@ thead th{background:var(--navy);color:var(--white);font-weight:600;
 tbody th{background:var(--bg);font-weight:600;color:var(--navy);width:38mm}
 thead{display:table-header-group}
 tr{break-inside:avoid}
+/* A short table that should move as one. Chrome keeps a caption with its heading
+   but will still break between the caption and the first row, leaving the heading
+   and caption alone at the foot of a page with every row overleaf. */
+.tablewrap.keep{break-inside:avoid}
 
 /* ---- chips ---- */
 .chip{display:inline-block;font:600 8pt/1 var(--font);padding:1.4mm 2.2mm;
@@ -342,12 +346,25 @@ INSTALL_BODY = f"""
 <h3>Optional: let Claude help with the two hard parts</h3>
 <p>Two jobs in this app cannot be done by a script: writing a description for each
    image, and judging whether a page reads in a sensible order. If you have Claude
-   Code installed and signed in, the app can offer both. It is
-   <strong>off until you switch it on</strong>, per document.</p>
+   Code installed and signed in, the app can offer both, on your own Claude Code
+   account. It is <strong>off until you switch it on</strong>, and it switches itself
+   off again when you quit.</p>
+<ol>
+  <li><strong>Install Claude Code</strong> if you have not already, then open Terminal,
+      run <code>claude</code> once and sign in. Trellis uses that terminal command,
+      which keeps its own sign-in, so do this even if you already use Claude in the
+      desktop app or a browser. It needs a paid Claude plan or an Anthropic Console
+      account.</li>
+  <li><strong>Quit and reopen Trellis.</strong> A <strong>Claude off</strong> switch
+      appears in the top right, next to Help tips. Click it to turn it on.</li>
+  <li><strong>On the Images step</strong>, press <strong>Draft the missing
+      descriptions</strong>. On the Structure step, press <strong>Check this page's
+      reading order</strong> under any page.</li>
+</ol>
 <ul>
-  <li><strong>Drafting descriptions</strong> sends a crop of each image, and the
-      text near it, to Claude. Not the whole page, and not the rest of the
-      document.</li>
+  <li><strong>Drafting descriptions</strong> sends a crop of each image, and up to 600
+      characters of the text on its page, to Claude. Not a picture of the page, and
+      nothing from the rest of the document.</li>
   <li><strong>Checking reading order</strong> sends only the words and where they
       sit. No image ever leaves the machine for this one.</li>
   <li><strong>Nothing is accepted for you.</strong> A drafted description arrives
@@ -377,7 +394,7 @@ INSTALL_BODY = f"""
 
 <section>
 <h2><span class="n">04</span>If something goes wrong</h2>
-<div class="tablewrap">
+<div class="tablewrap keep">
 <table>
   <caption>Common messages and what they mean</caption>
   <tbody>
@@ -395,6 +412,15 @@ INSTALL_BODY = f"""
     <tr><th>It warns the tagged copy will not be password protected</th>
         <td>Correct. Tagging has to rewrite the file and it comes out unprotected. The
             content is identical; re-apply the password to the copy if it matters.</td></tr>
+    <tr><th>There is no Claude switch in the top right</th>
+        <td>Trellis did not find Claude Code. Run <code>claude --version</code> in
+            Terminal; if that fails, it is not installed. If it works, quit and reopen
+            Trellis, which only looks when it starts.</td></tr>
+    <tr><th>It says your Claude Code sign-in has expired</th>
+        <td>The switch means Claude Code is installed, not that it is signed in. Run
+            <code>claude</code> in Terminal, sign in, and press the button again.</td></tr>
+    <tr><th>It says Claude Code did not answer in time</th>
+        <td>Each image gets two minutes. Usually a slow connection: try again.</td></tr>
     <tr><th>Anything else</th>
         <td>There is a log at <code>~/Library/Logs/Trellis.log</code>. Send that
             on with a note about what you were doing.</td></tr>
@@ -443,7 +469,8 @@ INSTALL_BODY = f"""
   <li><strong>Nothing is installed, and nothing leaves the machine unless somebody
       switches it on.</strong> The app runs a local server on 127.0.0.1 for its own
       window to talk to, on a random port. The one exception is the optional Claude
-      help described below, which is off until the user turns it on, per document.</li>
+      help described in section 03, which is off until the user turns it on and goes
+      off again when the app quits.</li>
 </ul>
 </section>
 """

@@ -96,6 +96,10 @@ thead th{background:var(--navy);color:var(--white);font-weight:600;
 tbody th{background:var(--bg);font-weight:600;color:var(--navy);width:38mm}
 thead{display:table-header-group}
 tr{break-inside:avoid}
+/* A short table that should move as one. Chrome keeps a caption with its heading
+   but will still break between the caption and the first row, leaving the heading
+   and caption alone at the foot of a page with every row overleaf. */
+.tablewrap.keep{break-inside:avoid}
 
 /* ---- chips ---- */
 .chip{display:inline-block;font:600 8pt/1 var(--font);padding:1.4mm 2.2mm;

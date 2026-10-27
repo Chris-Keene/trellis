@@ -60,6 +60,30 @@ You can also right-click a PDF and **Open With → Trellis**, or drop one on the
 Dock icon. It registers as an *alternate* handler for PDFs on purpose; hijacking
 the default handler would be a rude thing for a tagging tool to do.
 
+### Optional: Claude Code for image descriptions and reading order
+
+If [Claude Code](https://code.claude.com/docs/en/setup) is installed and signed in,
+a **Claude off** switch appears in the top right next to Help tips. Turn it on and
+two buttons appear: **Draft the missing descriptions** on the Images step, and
+**Check this page's reading order** on the Structure step. It runs on your own
+Claude Code account; there is no key to paste.
+
+1. Install Claude Code, then run `claude` once in Terminal and sign in. Trellis calls
+   that terminal command, which keeps its own sign-in, so do this even if you use
+   Claude in the desktop app or a browser.
+2. Quit and reopen Trellis. It looks for Claude Code at launch, in the places the
+   installer, Homebrew and nvm put it (`app/assist.py`), because an app started from
+   the Dock does not see your shell's `PATH`.
+
+What it sends, and only when you press a button: for a description, a crop of that
+one image plus up to 600 characters of its page's text; for reading order, that
+page's text (each item cut to 90 characters), roles and positions, never a picture.
+Drafts arrive unread and low-confidence and count as outstanding until a person has
+checked them. The switch is never remembered between launches.
+
+The switch shows when Claude Code is *installed*, not when it is signed in, so an
+expired sign-in surfaces on first use as "Your Claude Code sign-in has expired".
+
 ## Native window, and why it is shaped this way
 
 The window is a real `NSWindow` with a real menu bar, native open and save panels,
@@ -140,6 +164,11 @@ python3.11 -m venv .venv
 
 Dependencies: `pikepdf`, `pymupdf`, and `pyobjc-framework-WebKit` for the native
 window (about 6MB of wheels; without it the app still runs in the browser).
+
+Optional: `./.venv/bin/pip install anthropic` and an exported `ANTHROPIC_API_KEY`
+let a source run use the Claude help without Claude Code. The packaged app does not
+include the `anthropic` package, so it only works through Claude Code; when both are
+present, Claude Code wins.
 
 Optional but recommended: `brew install verapdf` for independent conformance
 validation. Without it the app still tags and exports, and says plainly that
