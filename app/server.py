@@ -356,9 +356,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": "Nothing is open."}, 400)
                 try:
                     if act == "alt":
-                        n = _draft_alt_text(model, data.get("ids") or [])
+                        n, stopped = _draft_alt_text(model, data.get("ids") or [])
                         out = payload()
                         out["drafted"] = n
+                        if stopped:
+                            out["stopped"] = stopped
                         return self._json(out)
                     if act == "order":
                         return self._json(
@@ -428,9 +430,15 @@ class Handler(BaseHTTPRequestHandler):
 def _draft_alt_text(model, ids):
     """Draft a description for each named image, from a crop of just that image.
 
-    Only the image itself is sent, never the whole page: a crop is the least that
-    can answer the question, and on a customer deck the rest of the slide is very
-    often the part nobody wants leaving the machine.
+    Only the image itself is sent, never a picture of the whole page: a crop is the
+    least that can answer the question, and on a customer deck the rest of the slide
+    is very often the part nobody wants leaving the machine. Up to 600 characters of
+    the page's text go with it as context.
+
+    Returns (drafted, stopped). A failure part way through stops the run but keeps
+    what was already drafted: raising here used to send back only an error, and the
+    next request then replaced this model with the browser's copy, which had never
+    seen those drafts, so minutes of work vanished.
     """
     wanted = set(ids)
     doc = pymupdf.open(model.path)
@@ -460,7 +468,12 @@ def _draft_alt_text(model, ids):
                                 dpi=150).save(crop)
                 PROGRESS["label"] = (f"Image {PROGRESS['done'] + 1} of "
                                      f"{PROGRESS['total']}, page {pm.number + 1}")
-                text, decorative, why = assist.draft_alt(crop, context, pm.number + 1)
+                try:
+                    text, decorative, why = assist.draft_alt(
+                        crop, context, pm.number + 1)
+                except assist.Unavailable as exc:
+                    PROGRESS.update(active=False, label="")
+                    return drafted, str(exc)
                 PROGRESS["done"] += 1
                 because = f" It said: {why}." if why else ""
                 if decorative:
@@ -481,7 +494,7 @@ def _draft_alt_text(model, ids):
                 e.drafted = True
                 drafted += 1
     PROGRESS.update(active=False, label="")
-    return drafted
+    return drafted, ""
 
 
 def _review_order(model, page_no):

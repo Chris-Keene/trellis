@@ -36,7 +36,7 @@ Measured on ten real Google Slides exports (1 to 20 pages): all ten reach
 For handing out to non-technical people, see **[INSTALL.md](INSTALL.md)**, which
 covers the Gatekeeper first-launch warning step by step. Every
 [release](https://github.com/Chris-Keene/trellis/releases) carries the zip
-(`Trellis-1.22.0.zip` for this version) and both PDF guides.
+(`Trellis-1.23.0.zip` for this version) and both PDF guides.
 
 ## Using it
 
@@ -81,8 +81,12 @@ page's text (each item cut to 90 characters), roles and positions, never a pictu
 Drafts arrive unread and low-confidence and count as outstanding until a person has
 checked them. The switch is never remembered between launches.
 
-The switch shows when Claude Code is *installed*, not when it is signed in, so an
-expired sign-in surfaces on first use as "Your Claude Code sign-in has expired".
+At launch it also asks `claude auth status --json` whether that command is signed in
+(local, free, about a third of a second). Signed out, there is no switch: the first
+step says Claude Code is here but not signed in, with a **Check again** button. An
+answer it cannot read (an older Claude Code, or Bedrock and the like, which sign in
+elsewhere) gets the benefit of the doubt, and a sign-in that lapses later still
+surfaces on first use. A run that stops part way keeps the drafts it already made.
 
 ## Native window, and why it is shaped this way
 
@@ -193,7 +197,7 @@ Needs `pyinstaller` in the venv. Output lands in `build/dist/`. The release zip
 is made with `ditto`, which keeps the code signature intact:
 
 ```bash
-ditto -c -k --sequesterRsrc --keepParent "build/dist/Trellis.app" dist/Trellis-1.22.0.zip
+ditto -c -k --sequesterRsrc --keepParent "build/dist/Trellis.app" dist/Trellis-1.23.0.zip
 ./build/export_docs.sh      # the two PDF guides, into dist/ beside it
 ```
 
@@ -265,8 +269,8 @@ Two fixtures work the same way. `tests/slides-6page.pdf` and
 `tests/slides-1page.pdf` are real exports if you drop them in; without them the
 suite builds a deck of the same shape and carries on.
 
-Exits non-zero on failure. A full run is 30 groups and 435 checks without the
-corpus (1.22.0), from round-trip, edge cases, fonts and nested text through to
+Exits non-zero on failure. A full run is 30 groups and 454 checks without the
+corpus (1.23.0), from round-trip, edge cases, fonts and nested text through to
 provenance, error messages and the HTTP API, plus 15 more with `--native-ui`.
 
 Two invariants are worth calling out, because they are what the suite is really

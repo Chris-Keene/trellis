@@ -70,23 +70,98 @@ def _claude_exe():
     return ""
 
 
+_AUTH_TIMEOUT = 10
+
+
+def _cli_env(exe):
+    env = dict(os.environ)
+    env["PATH"] = os.path.dirname(exe) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _cli_signed_in(exe):
+    """True or False when Claude Code says whether it is signed in, None when it can't.
+
+    Being installed is not being usable: the desktop app keeps its own sign-in, so a
+    Mac can have a working Claude and a signed-out `claude` command. Finding that
+    out on the first press of Draft meant offering a switch that failed on use.
+    `auth status` is local, free and takes about a third of a second. An older
+    Claude Code without it gets the benefit of the doubt, and an expired sign-in
+    is still caught on first use.
+    """
+    try:
+        proc = subprocess.run([exe, "auth", "status", "--json"], capture_output=True,
+                              text=True, timeout=_AUTH_TIMEOUT,
+                              stdin=subprocess.DEVNULL, env=_cli_env(exe))
+        data = json.loads(proc.stdout or "")
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or "loggedIn" not in data:
+        return None
+    # Bedrock, Vertex and the like sign in outside Anthropic, so loggedIn says
+    # nothing about whether they work.
+    if data.get("apiProvider", "firstParty") != "firstParty":
+        return None
+    return bool(data["loggedIn"])
+
+
+def _api_route():
+    """The API-key route, or None with the reason it is not usable."""
+    try:
+        import anthropic                                    # noqa: F401
+        have_lib = True
+    except Exception:
+        have_lib = False
+    key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if key and have_lib:
+        return {"route": "api-key", "detail": "ANTHROPIC_API_KEY",
+                "label": "Anthropic API key from the environment"}
+    # Offering the switch for either half on its own would fail on first use.
+    # The packaged app never has the library, so this is the case people meet.
+    if key:
+        return {"route": None, "detail": "",
+                "label": "An ANTHROPIC_API_KEY is set, but this copy of Trellis "
+                         "cannot use it. Install Claude Code instead."}
+    if have_lib:
+        return {"route": None, "detail": "",
+                "label": "The Anthropic library is here but no key is set."}
+    return None
+
+
+def _route():
+    """The route a call takes, matching what detect() offered.
+
+    No sign-in check in the usual case, since a call finds that out for itself and
+    this runs once per image. Only when both routes exist does it ask, so a
+    signed-out Claude Code cannot shadow a key that works.
+    """
+    cli = _claude_exe()
+    api = _api_route()
+    usable_api = api["route"] if api else None
+    if cli and not (usable_api and _cli_signed_in(cli) is False):
+        return "claude-code"
+    return usable_api
+
+
 def detect():
     """Which route is available, without spending anything to find out."""
     cli = _claude_exe()
     if cli:
-        return {"route": "claude-code", "detail": cli,
-                "label": "Claude Code, signed in on this Mac"}
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return {"route": "api-key", "detail": "ANTHROPIC_API_KEY",
-                "label": "Anthropic API key from the environment"}
-    try:
-        import anthropic                                    # noqa: F401
-    except Exception:
-        return {"route": None, "detail": "",
-                "label": "Nothing available. Install Claude Code, or set an "
-                         "ANTHROPIC_API_KEY, to switch this on."}
-    return {"route": "api-key-missing", "detail": "",
-            "label": "The Anthropic library is here but no key is set."}
+        signed_in = _cli_signed_in(cli)
+        if signed_in is not False:
+            return {"route": "claude-code", "detail": cli,
+                    "label": "Claude Code, signed in on this Mac" if signed_in
+                             else "Claude Code on this Mac"}
+        api = _api_route()
+        if api and api["route"]:
+            return api
+        return {"route": None, "detail": cli, "signed_out": True,
+                "label": "Claude Code is installed but not signed in. Open "
+                         "Terminal, run claude, sign in, then check again."}
+    return _api_route() or {
+        "route": None, "detail": "",
+        "label": "Nothing available. Install Claude Code, or set an "
+                 "ANTHROPIC_API_KEY, to switch this on."}
 
 
 def _run_cli(prompt, model, cwd):
@@ -95,8 +170,7 @@ def _run_cli(prompt, model, cwd):
     if not exe:
         raise Unavailable("Claude Code is not installed on this Mac.")
     try:
-        env = dict(os.environ)
-        env["PATH"] = os.path.dirname(exe) + os.pathsep + env.get("PATH", "")
+        env = _cli_env(exe)
         proc = subprocess.run(
             [exe, "-p", "--output-format", "json", "--model", model, prompt],
             cwd=cwd, capture_output=True, text=True, timeout=_CLI_TIMEOUT,
@@ -139,7 +213,7 @@ def _run_api(prompt, images=()):
 
 
 def _ask(prompt, model, images=(), files_dir=None):
-    route = detect()["route"]
+    route = _route()
     if route == "claude-code":
         return _run_cli(prompt, model, files_dir or tempfile.gettempdir())
     if route == "api-key":
@@ -229,9 +303,11 @@ def draft_alt(crop_path, context_text="", page_no=None):
         if context_text else ""
     prompt = (f"{_ALT_RULES}\n\nThe image is the file {os.path.basename(crop_path)} "
               f"in this directory. Read it first.{where}{ctx}")
-    route = detect()["route"]
+    route = _route()
     if route == "claude-code":
         out = _run_cli(prompt, ALT_MODEL, os.path.dirname(crop_path))
+    elif route != "api-key":
+        raise Unavailable(detect()["label"])
     else:
         import base64
         with open(crop_path, "rb") as fh:

@@ -32,7 +32,7 @@ Nothing else needs installing, and it works offline.
 
 ## Installing it (about a minute)
 
-**1. Unzip the file.** Double-click `Trellis-1.22.0.zip`. You'll get an app
+**1. Unzip the file.** Double-click `Trellis-1.23.0.zip`. You'll get an app
 called **Trellis**.
 
 **2. Drag it into your Applications folder.** Not essential, but it's where you'll
@@ -117,7 +117,7 @@ the end.
 
 ## Notes for whoever is handing this out
 
-**What to send:** `Trellis-1.22.0.zip` (89MB; Finder says 93.6 MB), attached to
+**What to send:** `Trellis-1.23.0.zip` (89MB; Finder says 93.6 MB), attached to
 each [release](https://github.com/Chris-Keene/trellis/releases) or built into
 `dist/`. Zipped with `ditto`, so the code signature survives the transfer. Slack and Drive handle that comfortably; email
 probably will not, so use a link.

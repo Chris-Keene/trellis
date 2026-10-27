@@ -2649,13 +2649,17 @@ def test_assist():
 
     d = assist.detect()
     check("it reports which route is available, without spending anything",
-          d["route"] in (None, "claude-code", "api-key", "api-key-missing"),
+          d["route"] in (None, "claude-code", "api-key"),
           str(d["route"]))
     check("and says so in a line a person can act on", bool(d["label"]), d["label"])
 
     # Everything below stubs the transport: the suite must never call out, both so
     # it stays free and so a network blip is not a test failure.
     real_ask, real_cli = assist._ask, assist._run_cli
+    real_exe, real_signed, real_api = (assist._claude_exe, assist._cli_signed_in,
+                                       assist._api_route)
+    global REAL_API_ROUTE
+    REAL_API_ROUTE = real_api
 
     try:
         assist._ask = lambda prompt, model, **kw: '{"ok": true}'
@@ -2701,7 +2705,7 @@ def test_assist():
                   assist.detect()["detail"] == fake, assist.detect()["detail"])
             os.remove(fake)
             check("with nothing installed it reports nothing available",
-                  assist.detect()["route"] in (None, "api-key", "api-key-missing"),
+                  assist.detect()["route"] in (None, "api-key"),
                   str(assist.detect()["route"]))
         finally:
             os.environ["PATH"], os.environ["HOME"] = real_path, real_home
@@ -2726,11 +2730,13 @@ def test_assist():
             ("DECORATIVE", "", True, ""),
             ("\u201cSmart quoted\u201d", "Smart quoted", False, ""),
         )
+        # Pinned to a signed-in Claude Code. These used to run against whatever
+        # this Mac had, and on a Mac whose `claude` was signed out every one of
+        # them was skipped without a word.
+        assist._claude_exe = lambda: "/fake/claude"
+        assist._cli_signed_in = lambda exe: True
         for reply, want, dec, why_want in cases:
             assist._run_cli = lambda prompt, model, cwd, r=reply: r
-            os.environ.pop("ANTHROPIC_API_KEY", None)
-            if assist.detect()["route"] != "claude-code":
-                break
             text, decorative, why = assist.draft_alt(img)
             check(f"a reply of {reply.splitlines()[0][:22]!r} parses",
                   (text, decorative, why) == (want, dec, why_want),
@@ -2756,8 +2762,120 @@ def test_assist():
         except assist.Unavailable as exc:
             check("an expired sign-in is reported, not swallowed",
                   "sign-in has expired" in str(exc), str(exc)[:50])
+
+        _test_assist_signin(assist, real_signed)
+        assist._claude_exe, assist._cli_signed_in, assist._api_route = (
+            real_exe, real_signed, real_api)
+        _test_assist_partial_run(assist)
     finally:
         assist._ask, assist._run_cli = real_ask, real_cli
+        assist._claude_exe, assist._cli_signed_in, assist._api_route = (
+            real_exe, real_signed, real_api)
+
+
+REAL_API_ROUTE = None
+
+
+def _test_assist_signin(assist, real_signed):
+    """Installed is not signed in, and a switch that fails on first use is a lie."""
+    # What `claude auth status --json` says, read from a stand-in binary.
+    fake = os.path.join(TMP, "authclaude")
+    def answers(body):
+        with open(fake, "w") as fh:
+            fh.write("#!/bin/sh\ncat <<'JSON'\n" + body + "\nJSON\n")
+        os.chmod(fake, 0o755)
+        return real_signed(fake)
+    check("a signed-out Claude Code is read as signed out",
+          answers('{"loggedIn": false, "apiProvider": "firstParty"}') is False)
+    check("a signed-in one as signed in",
+          answers('{"loggedIn": true, "authMethod": "claude.ai"}') is True)
+    check("an answer it cannot read is given the benefit of the doubt",
+          answers("Unknown command: auth") is None)
+    check("and Bedrock and friends are not judged by a claude.ai sign-in",
+          answers('{"loggedIn": false, "apiProvider": "bedrock"}') is None)
+
+    assist._claude_exe = lambda: "/fake/claude"
+    assist._api_route = lambda: None
+    assist._cli_signed_in = lambda exe: False
+    d = assist.detect()
+    check("installed but signed out offers no switch", d["route"] is None, str(d))
+    check("but says it is installed and how to sign in",
+          d.get("signed_out") is True and "sign in" in d["label"], d["label"])
+    assist._cli_signed_in = lambda exe: True
+    check("signed in, it is offered and says so",
+          assist.detect()["route"] == "claude-code"
+          and "signed in" in assist.detect()["label"], assist.detect()["label"])
+    assist._cli_signed_in = lambda exe: None
+    check("unknown, it is still offered without claiming a sign-in",
+          assist.detect()["route"] == "claude-code"
+          and "signed in" not in assist.detect()["label"], assist.detect()["label"])
+
+    # A signed-out Claude Code must not shadow an API key that would work.
+    key_route = {"route": "api-key", "detail": "ANTHROPIC_API_KEY", "label": "key"}
+    assist._api_route = lambda: key_route
+    assist._cli_signed_in = lambda exe: False
+    check("signed out with a working key, the key is offered",
+          assist.detect()["route"] == "api-key")
+    check("and calls go the same way as what was offered",
+          assist._route() == "api-key", str(assist._route()))
+    assist._cli_signed_in = lambda exe: True
+    check("signed in, Claude Code wins over a key", assist._route() == "claude-code")
+
+    # The packaged app has no anthropic package, so a key alone cannot work.
+    import importlib.util
+    assist._api_route = REAL_API_ROUTE
+    if importlib.util.find_spec("anthropic") is None:
+        os.environ["ANTHROPIC_API_KEY"] = "sk-test-not-a-key"
+        try:
+            r = assist._api_route()
+            check("a key without the library is not offered",
+                  r is not None and r["route"] is None, str(r))
+            check("and it says what to do instead",
+                  r is not None and "Claude Code" in r["label"], str(r))
+        finally:
+            os.environ.pop("ANTHROPIC_API_KEY", None)
+    else:
+        skip("a key without the library is not offered", "anthropic is installed here")
+
+
+def _test_assist_partial_run(assist):
+    """A run that fails part way keeps what it already drafted."""
+    from app import server
+    path = os.path.join(TMP, "twoimages.pdf")
+    doc = pymupdf.open()
+    pg = doc.new_page(width=720, height=405)
+    pg.insert_text((40, 60), "Results by quarter", fontsize=24)
+    for i, x in enumerate((40, 380)):
+        px = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 120, 80))
+        px.set_rect(px.irect, (30 + i * 90, 120, 200))
+        pg.insert_image(pymupdf.Rect(x, 120, x + 240, 280), pixmap=px)
+    doc.save(path); doc.close()
+    m = analyse(path)
+    imgs = [e for p in m.pages for e in p.elements if e.kind == "image"]
+    for e in imgs:
+        e.role, e.alt = "Figure", ""
+    calls = []
+    def flaky(crop, context="", page_no=None):
+        calls.append(crop)
+        if len(calls) == 1:
+            return "Bar chart of results", False, "bars and axes"
+        raise assist.Unavailable("Claude Code did not answer in time.")
+    real = assist.draft_alt
+    assist.draft_alt = flaky
+    try:
+        got = server._draft_alt_text(m, [])
+    except assist.Unavailable as exc:
+        got = ("raised", str(exc))
+    finally:
+        assist.draft_alt = real
+    check("the fixture has two images to draft", len(imgs) == 2, str(len(imgs)))
+    check("a failure part way stops the run and says why",
+          got == (1, "Claude Code did not answer in time."), str(got))
+    check("and the draft made before it is kept",
+          any(e.alt == "Bar chart of results" for e in imgs),
+          str([e.alt for e in imgs]))
+    check("still marked as a draft nobody has read",
+          all(not e.reviewed for e in imgs if e.alt), "")
 
     # A draft must never count as a decision.
     from app.model import Element
