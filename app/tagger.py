@@ -19,7 +19,7 @@ Two things happen per page:
 import pikepdf
 from pikepdf import Array, Dictionary, Name, Operator, String
 
-from .analyse import walk_content, walk_streams
+from .analyse import walk_streams, _visible as _visible_text
 from .hardening import harden
 
 # Structure types we emit that are not standard PDF 1.7 types need a RoleMap.
@@ -75,7 +75,14 @@ def _rewrite_streams(pdf, page, elements):
         tag = "LI" if e.role in _LIST_ROLES else e.role
         label_ops = set()
         if e.role in _LIST_ROLES and e.marker and len(e.ops) > 1:
-            label_ops = {tuple(e.ops[0])}
+            # The first range is the marker only when the marker had a line to
+            # itself, or the first line was drawn in more than one piece. When the
+            # bullet and the item's opening words share one range, calling that
+            # range the label would put the words in the Lbl and out of the LBody.
+            first = e.parts[0] if e.parts else None
+            if (first is None or not _visible_text(first.get("text", ""))
+                    or len(first.get("ops") or []) > 1):
+                label_ops = {tuple(e.ops[0])}
         for o in e.ops:
             o = tuple(o)
             tagged[o] = (tag, e.id, o in label_ops)

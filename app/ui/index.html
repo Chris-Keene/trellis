@@ -702,6 +702,21 @@ const ROLE_LABEL = {H1:"Heading 1",H2:"Heading 2",H3:"Heading 3",H4:"Heading 4",
   BlockQuote:"Quote",Caption:"Caption",LI:"List item",
   "LI-ordered":"Numbered item",Figure:"Image",Artifact:"Ignore (decoration)"};
 const label = r => ROLE_LABEL[r] || r;
+// Inside an accepted table the cell, not the item, is the header or data cell.
+// Badging those items "Paragraph" read as "the table has no headers" even when
+// the header row had been found, so the canvas names the cell instead.
+function cellOf(e){
+  const pg = S.doc && S.doc.pages[e.page];
+  for(const t of (pg && pg.tables) || []){
+    if(!t.accepted) continue;
+    for(const c of t.cells || []) if((c.elements||[]).includes(e.id)) return c;
+  }
+  return null;
+}
+function boxLabel(e){
+  const c = (e.role==="P" || e.role==="Span") ? cellOf(e) : null;
+  return c ? (c.header ? "Header cell" : "Cell") : label(e.role);
+}
 
 function say(msg){ $("#live").textContent = msg; }
 
@@ -709,7 +724,11 @@ async function api(path, opts){
   const r = await fetch(path, opts);
   const t = await r.text();
   let j = {}; try{ j = t ? JSON.parse(t) : {}; }catch(e){ throw new Error(t.slice(0,200)); }
-  if(!r.ok || j.error) throw new Error(j.error || ("Request failed: "+r.status));
+  if(!r.ok || j.error){
+    const err = new Error(j.error || ("Request failed: "+r.status));
+    err.data = j;                    // so a caller can act on more than the message
+    throw err;
+  }
   return j;
 }
 let _assistChecked = false;
@@ -1599,7 +1618,7 @@ function stagePanel(){
     const k=kindOf(e.role);
     const num = e.role==="Artifact" ? "–" : String(e.order+1);
     const name = (e.role==="Artifact" ? "Ignored" : "Item "+(e.order+1))+", "+
-      label(e.role)+", page "+(e.page+1)+": "+
+      boxLabel(e)+", page "+(e.page+1)+": "+
       (e.kind==="image" ? "image" : (e.text||"empty").slice(0,80));
     const review = needsReview(e);
     const b = el("button",{type:"button",class:"box","data-kind":k,
@@ -1611,7 +1630,7 @@ function stagePanel(){
       onclick:()=>{ S.sel = S.sel===e.id?null:e.id;
         S.itemTo = S.sel;            // bring its row into view in the list
         render(); }},[
-      el("span",{class:"tag","aria-hidden":"true",text:num+" "+label(e.role)}),
+      el("span",{class:"tag","aria-hidden":"true",text:num+" "+boxLabel(e)}),
       review ? el("span",{class:"flag","aria-hidden":"true",text:"?"}) : null]);
     stage.appendChild(b);
   });
@@ -1637,6 +1656,11 @@ function stagePanel(){
     bar.appendChild(el("span",{class:"hint",style:"margin:0",
       text:"Sends the words and their positions, never the page image."}));
     p.appendChild(bar);
+  } else if(S.assist.lapsed && !S.assist.route){
+    // Signed out part way through: offer the way back where the button was.
+    const ap = assistPanel(); if(ap) p.appendChild(ap);
+  }
+  if(S.assist.on){
     if(!S.assist.busy && S.assist.error && S.assist.errorFor === "order")
       p.appendChild(el("p",{class:"assist-stop",text:"That did not work: "+S.assist.error}));
     const notes = S.orderNotes;
@@ -1996,6 +2020,71 @@ async function assistDetect(){
     if(S.loaded) render();
   }catch(err){ S.assist.route = null; S.assist.label = ""; }
 }
+/* A sign-in that lapses mid-run used to end in an error telling people to go and
+   find Terminal. Now the switch goes off and the sign-in panel takes its place. */
+function signedOutNow(){
+  S.assist.route = null; S.assist.signedOut = true; S.assist.on = false;
+  S.assist.label = ""; S.assist.lapsed = true;
+  renderClaudeToggle(); render();
+  say("Claude Code needs signing in again. Anything already drafted is kept. "+
+      "Use Sign in to Claude to carry on.");
+}
+
+/* Claude Code's own sign-in runs in Terminal, because it may need a browser, SSO
+   or a pasted code. Trellis opens it and then watches, so nobody has to come back
+   and press Check again. */
+let _signinWatch = 0;
+async function signIn(){
+  S.assist.opening = true; S.assist.signinError = ""; render();
+  try{
+    await api("/api/assist",{method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({action:"signin"})});
+    S.assist.waiting = true;
+    say("Terminal is open. Sign in there and in your browser. Trellis switches "+
+        "Claude on by itself once you are signed in.");
+    watchSignIn();
+  }catch(err){
+    S.assist.signinError = err.message;
+    say("Could not start the sign-in. " + err.message);
+  }
+  S.assist.opening = false; render();
+  const b = $("#assistsignin"); if(b) b.focus();
+}
+async function watchSignIn(){
+  const mine = ++_signinWatch;
+  const until = Date.now() + 5*60*1000;
+  while(mine === _signinWatch && Date.now() < until){
+    await new Promise(r=> setTimeout(r, 3000));
+    if(mine !== _signinWatch || S.assist.route) return;
+    // Asked directly rather than through assistDetect, which redraws the view: a
+    // redraw every three seconds threw keyboard focus away, and would take a
+    // half-typed title with it. Nothing is redrawn until the answer changes.
+    let a;
+    try{
+      a = (await api("/api/assist",{method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({action:"detect"})})).assist;
+    }catch(err){ continue; }
+    if(mine !== _signinWatch) return;
+    if(a && a.route){
+      // Only the panel's own buttons hand focus on: anywhere else, leave it be.
+      const f = document.activeElement, id = f && f.id;
+      const ours = !f || f === document.body || id === "assistsignin" || id === "assistrecheck";
+      S.assist.route = a.route; S.assist.label = a.label; S.assist.signedOut = false;
+      S.assist.waiting = false; _signinWatch++;
+      renderClaudeToggle(); render();
+      const t = $("#claudetog"); if(ours && t) t.focus();
+      say("Signed in. Claude is ready, and the switch is in the top right.");
+      return;
+    }
+  }
+  if(mine === _signinWatch && !S.assist.route){
+    S.assist.waiting = false; render();
+    say("Trellis has stopped watching for the sign-in. Use Check again once you have finished.");
+  }
+}
+
 function assistPanel(){
   // Installed but signed out is the one case worth a panel without a route: it has
   // a fix the person can do in a minute, and the app can check again afterwards
@@ -2003,17 +2092,29 @@ function assistPanel(){
   if(!S.assist.route && S.assist.signedOut){
     const box = el("div",{class:"panel assist"});
     box.appendChild(el("h3",{text:"Claude Code is here, but not signed in"}));
-    box.appendChild(el("p",{class:"hint",
-      text:"Trellis can draft image descriptions and check reading order through "+
-           "Claude Code. Open Terminal, run claude, and sign in. Being signed in to "+
-           "the Claude desktop app does not always carry over to it."}));
-    box.appendChild(el("button",{class:"mini act",type:"button",
+    box.appendChild(el("p",{class:"hint", text: S.assist.waiting
+      ? "Finish signing in in the Terminal window and your browser. Trellis is "+
+        "watching, and switches Claude on here as soon as you are signed in."
+      : "Trellis can draft image descriptions and check reading order through "+
+        "Claude Code, once it is signed in. Being signed in to the Claude desktop "+
+        "app does not carry over to it."}));
+    const row = el("div",{class:"row",style:"gap:.5rem;flex-wrap:wrap"});
+    row.appendChild(el("button",{class:"btn",type:"button",id:"assistsignin",
+      disabled:S.assist.opening?"disabled":null,
+      text:S.assist.opening ? "Opening Terminal…"
+         : S.assist.waiting ? "Open the sign-in again" : "Sign in to Claude…",
+      onclick: signIn}));
+    box.appendChild(row);
+    if(S.assist.signinError) box.appendChild(el("p",{class:"fix",
+      text:S.assist.signinError}));
+    row.appendChild(el("button",{class:"mini act",type:"button",
       disabled:S.assist.checking?"disabled":null,
       id:"assistrecheck",
       text:S.assist.checking?"Checking\u2026":"Check again",
       onclick: async ()=>{
         S.assist.checking = true; render();
         await assistDetect();
+        if(S.assist.route){ S.assist.waiting = false; _signinWatch++; }
         S.assist.checking = false; render();
         // The render rebuilt the panel, so the button that had focus is gone. Put
         // focus somewhere useful: the switch that just appeared, or the button.
@@ -2115,10 +2216,15 @@ async function assistRun(action, body, onDone){
     onDone(j);
   }catch(err){
     S.assist.busy = false; S.assist.progress = null;
-    S.assist.error = err.message; render();
-    say("That did not work: " + err.message);
+    if(err.data && err.data.signed_out) signedOutNow();
+    else{
+      S.assist.error = err.message; render();
+      say("That did not work: " + err.message);
+    }
   }
-  refocus(mine);
+  // Signed out mid-run, the button that started it is gone: hand focus to the
+  // sign-in button that replaced it.
+  refocus(S.assist.lapsed && !S.assist.route && $("#assistsignin") ? "assistsignin" : mine);
 }
 
 function viewImages(v){
@@ -2156,7 +2262,9 @@ function viewImages(v){
         const n = j.drafted||0, what = n+" description"+(n===1?"":"s")+" drafted";
         if(j.stopped) S.assist.error = (n ? what+", then it stopped. "
                                           : "It stopped before drafting any. ") + j.stopped;
-        absorb(j); render();
+        absorb(j);
+        if(j.signed_out){ signedOutNow(); return; }
+        render();
         say(j.stopped ? S.assist.error
                       : what+". Read each one against its picture before you export.");
       })});
@@ -2175,6 +2283,12 @@ function viewImages(v){
     else if(S.assist.error && S.assist.errorFor === "alt")
       bar.appendChild(el("p",{class:"assist-stop",text:S.assist.error}));
     v.appendChild(bar);
+  } else if(S.assist.lapsed && !S.assist.route){
+    // Signed out part way through: say what happened to the run, then offer the
+    // way back where the Draft button was.
+    if(S.assist.error && S.assist.errorFor === "alt")
+      v.appendChild(el("p",{class:"assist-stop",text:S.assist.error}));
+    const ap = assistPanel(); if(ap) v.appendChild(ap);
   }
 
   fieldsPanel(v);
@@ -2319,9 +2433,12 @@ function viewExport(v){
 function resultPanel(r){
   const v = r.verapdf;
   const pass = v && v.compliant;
-  const box = el("div",{class:"result "+(pass?"pass":"fail"),role:"region",
+  const lost = r.untagged || [];
+  const clean = pass && !lost.length;
+  const box = el("div",{class:"result "+(clean?"pass":"fail"),role:"region",
     "aria-label":"Export result"});
-  box.appendChild(el("h2",{text: pass ? "Exported and conformant"
+  box.appendChild(el("h2",{text: clean ? "Exported and conformant"
+    : pass ? "Conformant, but not everything was tagged"
     : (v ? "Exported, but not yet conformant" : "Exported, not verified here")}));
   box.appendChild(el("p",{},[el("span",{text:"Saved to "}),
     el("strong",{text:r.out})]));
@@ -2339,6 +2456,20 @@ function resultPanel(r){
     const ul=el("ul");
     v.rules.forEach(x=>ul.appendChild(el("li",{text:x.clause+" test "+x.test+": "+
       x.description+" ("+x.checks+" checks)"})));
+    box.appendChild(ul);
+  }
+  // A passing conformance check says nothing about an item that never got a tag,
+  // so these are named here, next to the verdict, where they cannot be missed.
+  if(lost.length){
+    box.appendChild(el("p",{class:"fix",
+      text:(lost.length===1 ? "1 item was" : lost.length+" items were")+
+        " left out of the tags, because nothing on the page could be attached to "+
+        (lost.length===1 ? "it" : "them")+". The words are still in the file, but "+
+        "not as the "+(lost.length===1 ? "role" : "roles")+" you chose:"}));
+    const ul=el("ul");
+    lost.slice(0,8).forEach(x=>ul.appendChild(el("li",{text:
+      label(x.role)+", page "+(x.page+1)+": “"+(x.text||"").slice(0,60)+"”"})));
+    if(lost.length>8) ul.appendChild(el("li",{text:"and "+(lost.length-8)+" more"}));
     box.appendChild(ul);
   }
   const ex = r.extraction;
@@ -2365,7 +2496,9 @@ async function doExport(ask){
     if(j.cancelled){ render(); return; }
     S.result=j; if(j.summary) S.summary=j.summary;
     render();
-    say(j.verapdf&&j.verapdf.compliant ? "Exported and conformant." : "Exported.");
+    const nLost = (j.untagged||[]).length;
+    say(nLost ? "Exported, but "+nLost+" item"+(nLost===1?" was":"s were")+" left out of the tags."
+      : j.verapdf&&j.verapdf.compliant ? "Exported and conformant." : "Exported.");
     const h=document.querySelector(".result h2"); if(h){ h.tabIndex=-1; h.focus(); }
   }catch(err){ S.exporting=false; S.error=err.message; render(); }
 }

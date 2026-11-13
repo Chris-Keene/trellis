@@ -51,15 +51,15 @@ FACES = [("AtkinsonHyperlegibleNext-Regular.ttf", 400),
          ("AtkinsonHyperlegibleNext-Bold.ttf", 700)]
 
 APP = "Trellis"
-VERSION = "1.23.0"
+VERSION = "1.24.0"
 ZIP_NAME = f"{APP}-{VERSION}.zip"
 REPO_URL = "https://github.com/Chris-Keene/trellis"
 SITE_URL = "https://chriskeene.me/trellis"
 
-# Measured from the 1.23.0 build, not estimated; re-measure at each release.
+# Measured from the 1.24.0 build, not estimated; re-measure at each release.
 # Sizes are binary megabytes (MiB), the unit these guides have always used.
 # Finder counts decimal MB and shows about 5% more (93.6 MB for this zip).
-#   ZIP_SIZE          the shipped zip, 93,593,519 bytes
+#   ZIP_SIZE          the shipped zip, 93,604,779 bytes
 #   LITE_ZIP_SIZE     the zip from ./build/make_app.sh --no-verapdf, 46,119,834 bytes
 #                     (measured before the trellis icon, which added about 40KB)
 #   VERAPDF_ZIP       the difference between the two
@@ -70,8 +70,8 @@ ZIP_SIZE = "89MB"
 LITE_ZIP_SIZE = "44MB"
 VERAPDF_ZIP = "45MB"
 VERAPDF_UNZIPPED = "63MB"
-CHECKS = 454
-GROUPS = 30
+CHECKS = 484
+GROUPS = 32
 
 
 def _is_variable(data):
@@ -350,15 +350,16 @@ INSTALL_BODY = f"""
    account. It is <strong>off until you switch it on</strong>, and it switches itself
    off again when you quit.</p>
 <ol>
-  <li><strong>Install Claude Code</strong> if you have not already, then open Terminal,
-      run <code>claude</code> once and sign in. Trellis uses that terminal command,
-      which keeps its own sign-in, so do this even if you already use Claude in the
+  <li><strong>Install Claude Code</strong> if you have not already. Trellis uses its
+      terminal command, which keeps its own sign-in, separate from Claude in the
       desktop app or a browser. It needs a paid Claude plan or an Anthropic Console
       account.</li>
   <li><strong>Quit and reopen Trellis.</strong> A <strong>Claude off</strong> switch
       appears in the top right, next to Help tips. Click it to turn it on. If Claude
-      Code is installed but signed out, the first step says so instead, with a
-      <strong>Check again</strong> button for once you have signed in.</li>
+      Code is installed but signed out, the first step says so instead. Press
+      <strong>Sign in to Claude</strong>: a Terminal window opens Claude Code's own
+      sign-in, your browser asks you to log in, and the switch appears by itself
+      once you are done.</li>
   <li><strong>On the Images step</strong>, press <strong>Draft the missing
       descriptions</strong>. On the Structure step, press <strong>Check this page's
       reading order</strong> under any page.</li>
@@ -415,16 +416,19 @@ INSTALL_BODY = f"""
         <td>Correct. Tagging has to rewrite the file and it comes out unprotected. The
             content is identical; re-apply the password to the copy if it matters.</td></tr>
     <tr><th>It says Claude Code is here, but not signed in</th>
-        <td>Run <code>claude</code> in Terminal and sign in, then press
-            <strong>Check again</strong>. The switch appears without a restart.</td></tr>
+        <td>Press <strong>Sign in to Claude</strong> and finish signing in in the
+            Terminal window and your browser. The switch appears by itself, without a
+            restart. If Terminal does not open, run <code>claude auth login</code> in
+            Terminal yourself, then press <strong>Check again</strong>.</td></tr>
     <tr><th>There is no Claude switch and no such message</th>
         <td>Trellis did not find Claude Code. Run <code>claude --version</code> in
             Terminal; if that fails, it is not installed. If it works, quit and reopen
             Trellis, which looks for it when it starts.</td></tr>
     <tr><th>It says your Claude Code sign-in has expired</th>
-        <td>It lapsed after Trellis checked. Run <code>claude</code> in Terminal, sign
-            in, and press the button again. Any drafts made before it stopped are
-            kept.</td></tr>
+        <td>It lapsed after Trellis checked. The switch goes off and a
+            <strong>Sign in to Claude</strong> button takes the place of the one you
+            pressed. Sign in, switch Claude back on and press it again. Any drafts made
+            before it stopped are kept.</td></tr>
     <tr><th>It says Claude Code did not answer in time</th>
         <td>Each image gets two minutes. Usually a slow connection: try again.</td></tr>
     <tr><th>Anything else</th>

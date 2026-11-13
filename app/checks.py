@@ -9,7 +9,7 @@ what this app asks the user about.
 import os
 import re
 
-from .analyse import heading_warnings
+from .analyse import heading_warnings, _visible
 from .model import REVIEW_THRESHOLD
 
 # Alt text that passes every conformance checker and helps nobody.
@@ -77,6 +77,25 @@ def needs_review(e):
     return (e.kind == "text" and e.role != "Artifact"
             and not e.reviewed and e.score < REVIEW_THRESHOLD
             and bool(e.text.strip()))
+
+
+_LOST_LISTED = 8
+_ROLE_WORD = {"H1": "heading", "H2": "heading", "H3": "heading", "H4": "heading",
+              "H5": "heading", "H6": "heading", "LI": "list item",
+              "LI-ordered": "list item", "BlockQuote": "quote", "Caption": "caption",
+              "P": "paragraph", "Span": "text"}
+
+
+def untaggable(model):
+    """Items with words but no operators to wrap, as the model stands right now.
+
+    Such an item cannot get a tag of its own: whatever role it has never reaches
+    the file, and its words read as part of a neighbour or not at all. Conformance
+    checkers cannot see this, because nothing in the exported file is malformed.
+    """
+    return [e for p in model.pages for e in p.elements
+            if e.kind == "text" and e.role != "Artifact" and not e.ops
+            and _visible(e.text or "")]
 
 
 def review(model):
@@ -157,7 +176,8 @@ def review(model):
             "Anything you confirmed last time is still marked as checked."))
 
     nested = getattr(model, "nested_text_pages", 0)
-    unmappable = getattr(model, "unmappable", 0)
+    lost = untaggable(model)
+    unmappable = len(lost)
     if nested:
         issues.append(_issue(
             "blocker", "nested",
@@ -170,14 +190,31 @@ def review(model):
             "quietly marked as decoration, so the conformance check will fail and "
             "tell you the truth. Re-export the document from its source, or use a "
             "route that produces a tagged PDF directly."))
-    elif unmappable:
-        issues.append(_issue(
-            "warning", "nested",
-            f"{unmappable} piece{'s' if unmappable > 1 else ''} of text could not be "
-            "matched to anything on the page, so "
-            f"{'they' if unmappable > 1 else 'it'} will not be tagged.",
-            "This usually means the PDF stores that text in an unusual way. Check "
-            "the exported file reads correctly before sending it."))
+    elif lost:
+        # One issue per item, each linked to it, because a single count in a list
+        # of warnings is exactly what nobody acted on: three card titles set to
+        # Heading 2 vanished from an export while this said "30 pieces of text".
+        # Counted live, so an edit that strands a line shows up here too.
+        for e in lost[:_LOST_LISTED]:
+            snippet = e.text.strip()
+            snippet = snippet if len(snippet) <= 50 else snippet[:49].rstrip() + "…"
+            issues.append(_issue(
+                "blocker", "untaggable",
+                f"“{snippet}” has nothing on the page this app can attach its "
+                f"{_ROLE_WORD.get(e.role, 'tag')} to, so it will be left out of "
+                "the exported file.",
+                "Its words are drawn as part of something else on the page. Join "
+                "it to the item before it, or re-export the original PDF, then "
+                "check the exported file reads correctly.",
+                page=e.page, eid=e.id))
+        if len(lost) > _LOST_LISTED:
+            more = len(lost) - _LOST_LISTED
+            issues.append(_issue(
+                "blocker", "untaggable",
+                f"{more} more item{'s' if more > 1 else ''} cannot be tagged for the "
+                "same reason.",
+                "This PDF stores its text in a way this app cannot fully reach. "
+                "Check the exported file reads correctly before sending it."))
 
     t3 = list(getattr(model, "type3_fonts", []) or [])
     if t3:

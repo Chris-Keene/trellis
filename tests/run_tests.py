@@ -2118,6 +2118,278 @@ def test_flat_foreign_tags():
           str(sum(1 for p in m2.pages for e in p.elements if e.role.startswith("H"))))
 
 
+def make_multiline_pdf(path):
+    """The shapes WeasyPrint writes, which 1.23 mangled.
+
+    A heading and a whole paragraph in one text object, a line pair moved with Td
+    (which the walker ignored), a tight code block whose leading drags a page-wide
+    wrap measure down, a numbered list whose numbers are drawn after all its text,
+    and a bullet that shares a run with its item's opening words.
+    """
+    pdf = pikepdf.new()
+    fonts = {}
+    for key, base in (("F1", "Helvetica"), ("F2", "Helvetica-Bold"), ("F3", "Courier")):
+        fonts[key] = pdf.make_indirect(pikepdf.Dictionary(
+            Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type1,
+            BaseFont=pikepdf.Name("/" + base), Encoding=pikepdf.Name.WinAnsiEncoding))
+    lines = [
+        # heading + three-line paragraph, all in one text object
+        "BT /F2 14 Tf 1 0 0 1 72 720 Tm (Scheduled flow scans) Tj",
+        "/F1 10 Tf 1 0 0 1 72 698 Tm (Have Claude run your key user flows on staging on a schedule, and) Tj",
+        "1 0 0 1 72 683 Tm (upload each session to the platform. The analysis runs while you) Tj",
+        "1 0 0 1 72 668 Tm (work on something else, so regressions are caught early.) Tj ET",
+        # a paragraph moved with Td alone
+        "BT /F1 10 Tf 72 638 Td (A second paragraph positioned with Td, which used to be ignored.) Tj",
+        "0 -15 Td (Its second line sits fifteen points below the first one.) Tj ET",
+        # a tight code block at a smaller size
+        "BT /F3 8.5 Tf 1 0 0 1 80 600 Tm (Scan https://www.example.com for issues) Tj",
+        "1 0 0 1 80 590.5 Tm (with WFA and summarize what it finds.) Tj",
+        "1 0 0 1 80 581 Tm (Then list the critical issues by step) Tj",
+        "1 0 0 1 80 571.5 Tm (with the affected elements for each) Tj",
+        "1 0 0 1 80 562 Tm (and a short fix for every one.) Tj ET",
+        # a numbered list: text first, numbers drawn afterwards
+        "BT /F1 10 Tf 1 0 0 1 92 520 Tm (Open the settings page.) Tj",
+        "1 0 0 1 92 505 Tm (Add the connector.) Tj",
+        "1 0 0 1 92 490 Tm (Sign in with your own account.) Tj ET",
+        "BT /F1 10 Tf 1 0 0 1 76 520 Tm (1.) Tj ET",
+        "BT /F1 10 Tf 1 0 0 1 76 505 Tm (2.) Tj ET",
+        "BT /F1 10 Tf 1 0 0 1 76 490 Tm (3.) Tj ET",
+        # a bullet sharing its run with the opening words, then a wrapped line
+        "BT /F1 10 Tf 1 0 0 1 76 450 Tm (\\225 A bulleted item whose words run on) Tj",
+        "1 0 0 1 86 435 Tm (onto a second line.) Tj ET",
+    ]
+    page = pikepdf.Dictionary(
+        Type=pikepdf.Name.Page, MediaBox=[0, 0, 612, 792],
+        Resources=pikepdf.Dictionary(Font=pikepdf.Dictionary(**fonts)),
+        Contents=pdf.make_stream("\n".join(lines).encode("latin-1")))
+    pdf.pages.append(pikepdf.Page(page))
+    pdf.docinfo["/Title"] = "Many lines in one text object"
+    pdf.save(path)
+    return path
+
+
+def _marks_nest_inside_text(path):
+    """Every BDC/EMC pair opens and closes on the same side of BT/ET."""
+    bad = []
+    for pno, page in enumerate(pikepdf.open(path).pages):
+        in_bt, stack = False, []
+        for item in pikepdf.parse_content_stream(page):
+            op = str(item.operator)
+            if op == "BT":
+                in_bt = True
+            elif op == "ET":
+                if any(opened for opened in stack):
+                    bad.append(f"p{pno + 1}: ET with a mark still open inside it")
+                in_bt = False
+            elif op in ("BDC", "BMC"):
+                stack.append(in_bt)
+            elif op == "EMC":
+                if not stack or stack.pop() != in_bt:
+                    bad.append(f"p{pno + 1}: EMC closes across a BT/ET boundary")
+    return bad
+
+
+def test_text_objects_with_many_lines():
+    section("4i. Several lines in one text object (WeasyPrint)")
+    from app.analyse import _wrap_gaps, _wrap_gap, _order_tables, _pair_markers
+    from app.checks import untaggable, review
+    from app.model import Element, Table, Cell
+
+    src = make_multiline_pdf(os.path.join(TMP, "multiline.pdf"))
+    m = normalise_headings(analyse(src))
+    els = sorted(m.pages[0].elements, key=lambda e: e.order)
+    texts = [(e.role, e.text) for e in els if e.kind == "text" and e.role != "Artifact"]
+    find = lambda s: next((e for e in els if s in e.text), None)
+
+    check("every line has something on the page to tag", untaggable(m) == [],
+          str([e.text[:30] for e in untaggable(m)]))
+    head = find("Scheduled flow scans")
+    check("a heading sharing a text object with its paragraph stands alone",
+          head is not None and head.text.strip() == "Scheduled flow scans"
+          and head.role.startswith("H") and head.ops, str(texts[:2]))
+    para = find("Have Claude run")
+    check("the paragraph's three lines are one item",
+          para is not None and "caught early" in para.text and len(para.ops) == 3,
+          f"{para and para.text[:40]} ops={para and len(para.ops)}")
+    td = find("positioned with Td")
+    check("lines moved with Td are found and kept together",
+          td is not None and "fifteen points" in td.text and len(td.ops) == 2,
+          f"{td and td.text[:40]} ops={td and len(td.ops)}")
+    items = [e for e in els if e.role == "LI-ordered"]
+    check("numbers drawn after the list text still pair with their items",
+          [e.text for e in items] == ["Open the settings page.", "Add the connector.",
+                                      "Sign in with your own account."],
+          str([(e.marker, e.text) for e in items]))
+    bullet = find("bulleted item")
+    check("a bullet item and its wrapped line stay one item",
+          bullet is not None and bullet.role == "LI" and "second line" in bullet.text,
+          f"{bullet and bullet.role} {bullet and bullet.text[:40]}")
+
+    # The pooled measure is what broke 1.23: the code block's tight leading set
+    # the bar for the body text. Per size, each keeps its own.
+    lines = [{"size": 10.0, "bbox": (72, y, 400, y + 9.25)}
+             for y in (100, 115, 130, 160, 175)] + \
+            [{"size": 8.5, "bbox": (80, y, 300, y + 6.7)} for y in (200, 209.5, 219, 228.5, 238)]
+    per = _wrap_gaps(lines)
+    check("wrap gaps are measured per text size",
+          abs(per.get(10.0, 0) - 5.75) < 0.01 and per.get(8.5, 9) < 3.0, str(per))
+    check("and the page-wide measure is still there as the fallback",
+          _wrap_gap(lines) is not None and _wrap_gap(lines) < 3.0, str(_wrap_gap(lines)))
+
+    # A marker with two candidates beside it is left where it was.
+    body = [{"text": "Alpha", "bbox": (92, 100, 200, 110), "size": 10},
+            {"text": "Beta", "bbox": (92, 100.5, 200, 110.5), "size": 10}]
+    mk = {"text": "1.", "bbox": (76, 100, 86, 110), "size": 10}
+    check("an ambiguous marker is not moved", _pair_markers(body + [mk])[-1] is mk)
+
+    # Set by hand, the way the lost card titles were. This file's only heading,
+    # so H1 rather than H2, or the tree check rightly objects.
+    head.role, head.reviewed = "H1", True
+    out = os.path.join(TMP, "multiline-tagged.pdf")
+    build(m, out)
+    roles = struct_roles(out)
+    check("the heading reaches the file", roles.get("H1") == 1, str(roles))
+    check("marks nest inside text objects, never across them",
+          not _marks_nest_inside_text(out), str(_marks_nest_inside_text(out)[:3]))
+    problems, _counts = inspect_structure(out)
+    check("the tree is internally consistent", not problems, str(problems[:3]))
+    check("text extracts exactly as before", text_of(out) == text_of(src))
+    pdf = pikepdf.open(out)
+
+    def kids(n):
+        k = n.get("/K")
+        return list(k) if isinstance(k, pikepdf.Array) else ([k] if k is not None else [])
+
+    def walk(n, acc):
+        if isinstance(n, pikepdf.Dictionary) and "/S" in n:
+            acc.append(n)
+            for c in kids(n):
+                walk(c, acc)
+        return acc
+    nodes = [x for k in kids(pdf.Root.StructTreeRoot) for x in walk(k, [])]
+    lis = [n for n in nodes if n.S == "/LI"]
+    with_lbl = [n for n in lis if any(isinstance(c, pikepdf.Dictionary)
+                                      and c.get("/S") == "/Lbl" for c in kids(n))]
+    check("each drawn-after number becomes its item's label",
+          len(with_lbl) == 3, f"{len(with_lbl)} of {len(lis)} items have a Lbl")
+    check("a bullet sharing a run with words is not made the label",
+          len(lis) == 4 and len(with_lbl) == 3, f"{len(lis)} items")
+
+    # A table read as one block, even when column detection splits it.
+    def el_(i, order, page=0):
+        return Element(id=i, page=page, kind="text", role="P", text=i, order=order)
+    es = [el_("before", 0), el_("a1", 1), el_("a2", 2), el_("after", 3),
+          el_("b1", 4), el_("b2", 5)]
+    t = Table(id="t", page=0, rows=2, cols=2, cells=[
+        Cell(row=0, col=0, elements=["a1"]), Cell(row=0, col=1, elements=["b1"]),
+        Cell(row=1, col=0, elements=["a2"]), Cell(row=1, col=1, elements=["b2"])])
+    _order_tables(es, [t])
+    seq = [e.id for e in sorted(es, key=lambda e: e.order)]
+    check("a line under a split table is read after it, not between its rows",
+          seq == ["before", "a1", "b1", "a2", "b2", "after"], str(seq))
+
+    # Live, not counted once: an item an edit strands is flagged straight away.
+    para.ops = []
+    issues = review(m)
+    check("an item with nothing to tag is flagged as needed, linked to it",
+          any(i["kind"] == "untaggable" and i["severity"] == "blocker"
+              and i["id"] == para.id for i in issues),
+          str([i["kind"] for i in issues]))
+
+
+def test_sign_in():
+    section("5b. Signing Claude Code in from the app")
+    import app.assist as assist
+
+    check("an expired sign-in is recognised by type",
+          assist.is_sign_in_problem(assist.SignedOut(assist.SIGNED_OUT_MESSAGE)))
+    check("and by the message a stopped run keeps",
+          assist.is_sign_in_problem(assist.SIGNED_OUT_MESSAGE))
+    check("other failures are not mistaken for it",
+          not assist.is_sign_in_problem(assist.Unavailable("Claude Code did not answer in time.")))
+
+    # The real _run_cli against a stand-in that answers like an expired login.
+    fake = os.path.join(TMP, "expiredclaude")
+    with open(fake, "w") as fh:
+        fh.write('#!/bin/sh\necho \'{"is_error": true, "result": "Failed to authenticate. '
+                 'OAuth session expired and could not be refreshed"}\'\n')
+    os.chmod(fake, 0o755)
+    real_exe = assist._claude_exe
+    assist._claude_exe = lambda: fake
+    try:
+        try:
+            assist._run_cli("hello", "sonnet", TMP)
+            check("an expired login raises SignedOut", False, "no error")
+        except assist.Unavailable as exc:
+            check("an expired login raises SignedOut",
+                  isinstance(exc, assist.SignedOut), type(exc).__name__)
+    finally:
+        assist._claude_exe = real_exe
+
+    # The script Terminal runs: a path with a space and a quote must survive.
+    odd_dir = os.path.join(TMP, "a dir's name")
+    os.makedirs(odd_dir, exist_ok=True)
+    rec = os.path.join(TMP, "signin-args.txt")
+    stub = os.path.join(odd_dir, "claude")
+    with open(stub, "w") as fh:
+        fh.write(f'#!/bin/sh\necho "$@" > {shlex_quote(rec)}\n')
+    os.chmod(stub, 0o755)
+    script = os.path.join(TMP, "signin.command")
+    with open(script, "w") as fh:
+        fh.write(assist._sign_in_script(stub))
+    os.chmod(script, 0o700)
+    proc = subprocess.run(["/bin/sh", script], capture_output=True, text=True,
+                          timeout=20, env={"PATH": "/usr/bin:/bin", "TERM": "dumb"})
+    got = open(rec).read().strip() if os.path.exists(rec) else ""
+    check("the sign-in script runs Claude Code's own login", got == "auth login", repr(got))
+    check("and reports success", "Done." in proc.stdout, proc.stdout[-80:])
+    check("and removes itself", not os.path.exists(script))
+
+    # Opening it: no Terminal during tests, so `open` is stood in for.
+    real_run, calls = subprocess.run, []
+
+    def fake_run(cmd, *a, **k):
+        if cmd and cmd[0] == "open":
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, fake_run.code, "", "")
+        return real_run(cmd, *a, **k)
+    assist._claude_exe = lambda: stub
+    assist.subprocess.run = fake_run
+    try:
+        fake_run.code = 0
+        res = assist.start_sign_in()
+        opened = calls[-1][1] if calls else ""
+        check("sign-in opens a .command file, not AppleScript",
+              res.get("opened") and opened.endswith(".command") and len(calls[-1]) == 2,
+              str(calls[-1:]))
+        check("which is private to this user", os.path.exists(opened)
+              and (os.stat(opened).st_mode & 0o077) == 0)
+        if os.path.exists(opened):
+            os.unlink(opened)
+        fake_run.code = 1
+        try:
+            assist.start_sign_in()
+            check("a failure to open Terminal says what to do instead", False, "no error")
+        except assist.Unavailable as exc:
+            check("a failure to open Terminal says what to do instead",
+                  "claude auth login" in str(exc), str(exc))
+        check("and leaves no script behind", not os.path.exists(calls[-1][1]))
+        assist._claude_exe = lambda: None
+        try:
+            assist.start_sign_in()
+            check("with no Claude Code there is nothing to open", False, "no error")
+        except assist.Unavailable:
+            check("with no Claude Code there is nothing to open", True)
+    finally:
+        assist.subprocess.run = real_run
+        assist._claude_exe = real_exe
+
+
+def shlex_quote(s):
+    import shlex
+    return shlex.quote(s)
+
+
 def test_unreliable_tags():
     section("4i. Tags that are present but wrong")
     from app.analyse import unreliable_tags, _visible
@@ -3515,6 +3787,31 @@ def test_api():
                   json.dumps({"t": sum(1 for p in doc["pages"]
                                        for e in p["elements"] if e["role"] != "Artifact")}))["t"],
               f"{second['summary']['tagged']} items")
+        check("a clean export names nothing as left out",
+              first.get("untagged") == [], str(first.get("untagged"))[:80])
+
+        # An item with nothing on the page to wrap: its role never reaches the
+        # file, and conformance checkers cannot tell. It has to be named.
+        doc = second["doc"]
+        victim = next((e for p in doc["pages"] for e in p["elements"]
+                       if e["kind"] == "text" and e["text"].strip()), None)
+        if victim is not None:
+            victim["ops"], victim["role"] = [], "H2"
+        out4 = os.path.join(TMP, "api-stranded.pdf")
+        code, body = api(port, "/api/export",
+                         data=json.dumps({"doc": doc, "out": out4}).encode(),
+                         headers={"Content-Type": "application/json"})
+        res = json.loads(body) if code == 200 else {}
+        named = [x for x in res.get("untagged", []) if victim and x["id"] == victim["id"]]
+        check("an item with nothing to tag is named in the export result",
+              bool(named) and named[0]["role"] == "H2",
+              str(res.get("untagged"))[:120])
+        code, body = api(port, "/api/state")
+        issues = json.loads(body).get("issues", [])
+        check("and flagged as needed, linked to the item, before export",
+              any(i["kind"] == "untaggable" and i["severity"] == "blocker"
+                  and i.get("id") == (victim or {}).get("id") for i in issues),
+              str([i["kind"] for i in issues]))
     finally:
         try:
             api(port, "/api/quit", data=b"{}", timeout=5)
@@ -3558,6 +3855,7 @@ def main():
             ("detect", test_detection),
             ("flat", test_flat_foreign_tags),
             ("wrap", test_wrap_vs_break),
+            ("lines", test_text_objects_with_many_lines),
             ("unreliable", test_unreliable_tags),
             ("docdeck", test_document_vs_deck),
             ("torder", test_table_reading_order),
@@ -3565,6 +3863,7 @@ def main():
             ("forms", test_form_fields),
             ("shaded", test_shaded_tables),
             ("assist", test_assist),
+            ("signin", test_sign_in),
             ("flow", test_flow_downwards),
             ("layout", test_layout_rules),
             ("checks", test_checks_layer),

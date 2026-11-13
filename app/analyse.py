@@ -44,6 +44,7 @@ def _mul(a, b):
 
 
 _SHOW_TEXT = {"Tj", "TJ", "'", '"'}
+_MOVE_TEXT = {"Tm", "Td", "TD", "T*"}
 
 
 def form_contents(xobj, depth=0, seen=None):
@@ -116,7 +117,9 @@ def walk_streams(page):
         xobjs = (owner.get("/Resources") or {}).get("/XObject", {}) or {}
         ctm = base_ctm
         stack = []
-        bt = tm = fsize = font = None
+        bt = tm = tlm = fsize = font = None
+        leading = 0.0
+        runs, moved_at = [], None
         for i, item in enumerate(ins):
             op = str(item.operator)
             rands = item.operands
@@ -133,18 +136,76 @@ def walk_streams(page):
                 if len(vals) == 6:
                     ctm = _mul(vals, ctm)
             elif op == "BT":
-                bt, tm = i, (1, 0, 0, 1, 0, 0)
+                bt, tm, tlm = i, (1, 0, 0, 1, 0, 0), (1, 0, 0, 1, 0, 0)
+                runs, moved_at = [], None
             elif op == "Tf":
-                font, fsize = str(rands[0]), float(rands[1])
-            elif op == "Tm":
-                tm = tuple(float(x) for x in rands)
+                try:
+                    font, fsize = str(rands[0]), float(rands[1])
+                except (IndexError, TypeError, ValueError):
+                    pass
+            elif op == "TL" and rands:
+                leading = float(rands[0])
+            elif op in _MOVE_TEXT and bt is not None:
+                # Every way of starting a new line, so each line inside one text
+                # object gets its own position. Td/TD/T* used to be ignored, which
+                # left a text object that moves with them positioned at its start.
+                try:
+                    if op == "Tm":
+                        tm = tlm = tuple(float(x) for x in rands)
+                    elif op == "T*":
+                        tm = tlm = _mul((1, 0, 0, 1, 0, -leading), tlm)
+                    else:
+                        tx, ty = float(rands[0]), float(rands[1])
+                        if op == "TD":
+                            leading = -ty
+                        tm = tlm = _mul((1, 0, 0, 1, tx, ty), tlm)
+                except (IndexError, TypeError, ValueError):
+                    pass
+                if moved_at is None:
+                    moved_at = i
+            elif op in _SHOW_TEXT and bt is not None:
+                if op in ("'", '"'):
+                    # Both move to the next line before showing anything.
+                    tm = tlm = _mul((1, 0, 0, 1, 0, -leading), tlm)
+                    if moved_at is None:
+                        moved_at = i
+                # One text object can hold a whole block of lines: WeasyPrint
+                # writes one per colour run, so a heading and the paragraph under
+                # it shared a single BT/ET. Treated as one unit, positioned at its
+                # last line, everything above that line had nothing to tag, and a
+                # heading set by hand vanished on export. A move followed by more
+                # text starts a new run, and each run is tagged on its own.
+                if not runs or moved_at is not None:
+                    m = _mul(tm, ctm)
+                    scale = (m[2] ** 2 + m[3] ** 2) ** 0.5 or 1.0
+                    start = bt + 1 if not runs else moved_at
+                    runs.append({"start": start, "end": i, "x": m[4], "y": m[5],
+                                 "size": (fsize or 0) * scale, "font": font})
+                runs[-1]["end"] = i
+                moved_at = None
             elif op == "ET" and bt is not None:
-                m = _mul(tm, ctm)
-                scale = (m[2] ** 2 + m[3] ** 2) ** 0.5 or 1.0
-                units.append({"kind": "text", "ops": (key, bt, i), "stream": key,
-                              "x": m[4], "y": m[5], "size": (fsize or 0) * scale,
-                              "font": font})
+                if len(runs) > 1:
+                    # Each run lies strictly inside BT/ET, so its BDC/EMC pair nests
+                    # inside the text object as the spec allows, and never straddles
+                    # the object's boundary.
+                    for r in runs:
+                        units.append({"kind": "text", "ops": (key, r["start"], r["end"]),
+                                      "stream": key, "x": r["x"], "y": r["y"],
+                                      "size": r["size"], "font": r["font"]})
+                else:
+                    # One run, or none: the whole object stays one unit, exactly as
+                    # before, so files that were fine keep their output unchanged.
+                    if runs:
+                        r = runs[0]
+                        x, y, size, rfont = r["x"], r["y"], r["size"], r["font"]
+                    else:
+                        m = _mul(tm, ctm)
+                        scale = (m[2] ** 2 + m[3] ** 2) ** 0.5 or 1.0
+                        x, y, size, rfont = m[4], m[5], (fsize or 0) * scale, font
+                    units.append({"kind": "text", "ops": (key, bt, i), "stream": key,
+                                  "x": x, "y": y, "size": size, "font": rfont})
                 bt = None
+                runs, moved_at = [], None
             elif op == "Do":
                 nm = str(rands[0])
                 xo = xobjs.get(nm)
@@ -1075,7 +1136,12 @@ def _wrap_gap(lines):
     Sampled only between consecutive lines of the same size starting at the same
     x, which is what a left-aligned continuation looks like.
     """
-    gaps = []
+    return _typical_wrap([g for _s, g in _wrap_samples(lines)])
+
+
+def _wrap_samples(lines):
+    """(size, gap) for each pair of lines that could be a wrap."""
+    out = []
     prev = None
     for ln in lines:
         if prev is not None:
@@ -1088,20 +1154,81 @@ def _wrap_gap(lines):
                 # threw away exactly the samples that say what a wrap looks like
                 # on a densely set page, leaving only the real breaks behind.
                 if -3 <= d < 40:
-                    gaps.append(max(0.0, d))
+                    out.append((ln["size"], max(0.0, d)))
         prev = ln
+    return out
+
+
+def _typical_wrap(gaps):
     if len(gaps) < 4:
         return None
-    gaps.sort()
+    gaps = sorted(gaps)
     return gaps[len(gaps) // 5]           # 20th percentile: a typical wrap
+
+
+def _size_key(size):
+    return round(size * 2) / 2
+
+
+def _wrap_gaps(lines):
+    """The wrap gap for each text size that has enough samples of its own.
+
+    Leading belongs to a style, not to the page. One page-wide figure let a tight
+    code block (8.5pt, 2.4pt wraps) set the bar for 10pt body text on 1.5 leading
+    (5pt wraps), so every wrapped line of the body became its own paragraph. A
+    size with too few samples falls back to the page-wide figure, as before.
+    """
+    by_size = {}
+    for size, gap in _wrap_samples(lines):
+        by_size.setdefault(_size_key(size), []).append(gap)
+    return {k: w for k, v in by_size.items()
+            if (w := _typical_wrap(v)) is not None}
+
+
+def _pair_markers(lines):
+    """Move each bare list marker to just before the words it sits beside.
+
+    Grouping reads lines in content-stream order, and a marker is assumed to come
+    right before its item. WeasyPrint draws every marker of a list after all of
+    the list's text, so the markers arrived as a row of empty items at the end,
+    and once wrapped lines merged properly each item's text ran on into the next:
+    list items here are spaced exactly like wrapped lines. Pairing by position
+    restores the order the reader sees. A marker with no clear partner stays put.
+    """
+    def bare(ln):
+        marker, rest, _o = _strip_marker(ln["text"])
+        return bool(marker) and not _visible(rest)
+
+    def beside(mk, ln):
+        a, b = mk["bbox"], ln["bbox"]
+        ov = min(a[3], b[3]) - max(a[1], b[1])
+        if ov <= 0.5 * min(a[3] - a[1], b[3] - b[1]):
+            return False
+        # To the right of the marker, and close: a hanging indent, not a column.
+        reach = max(30.0, 4 * (mk.get("size") or 0))
+        return a[2] - 1 <= b[0] <= a[2] + reach
+
+    if not any(bare(ln) for ln in lines):
+        return lines
+    out = list(lines)
+    for mk in [ln for ln in lines if bare(ln)]:
+        partners = [ln for ln in out if ln is not mk and not bare(ln) and beside(mk, ln)]
+        if len(partners) != 1:
+            continue
+        target = partners[0]
+        out.remove(mk)
+        out.insert(out.index(target), mk)
+    return out
 
 
 def _group(lines, body, pno, cols, H, shapes=()):
     """Turn lines into elements, merging wrapped lines into one paragraph."""
+    lines = _pair_markers(lines)
     out = []
     cur = None
     last = None                      # bbox of the line cur last absorbed
     wrap = _wrap_gap(lines)          # what a real wrap looks like on this page
+    wraps = _wrap_gaps(lines)        # ...and for each text size that says so itself
     # An asterisk is a footnote mark as often as it is a bullet, so it only counts
     # as one when the page has more than one of them: "* Loaded cost estimate of
     # $250K/year" at the foot of a section was coming through as a list item.
@@ -1193,7 +1320,8 @@ def _group(lines, body, pno, cols, H, shapes=()):
             cur is None
             or not same_col
             or (abs(cur.size - ln["size"]) > 0.6 and not awaiting_text)
-            or gap > _break_at(ln["size"], wrap)            # paragraph break
+            or gap > _break_at(ln["size"],                  # paragraph break
+                               wraps.get(_size_key(ln["size"]), wrap))
             # Text flows down. A line that starts above the element it would join
             # is not a continuation of it, whatever the content stream's order:
             # a step number drawn in the margin *after* its paragraph was merging
@@ -1890,11 +2018,23 @@ def _order_tables(elements, tables):
                 if e is not None and e.id not in seen:
                     seen.add(e.id)
                     seq.append(e)
+        seq = [e for e in seq if e.role != "Artifact"]
         if len(seq) < 2:
             continue
-        slots = sorted(e.order for e in seq)
-        for e, slot in zip(seq, slots):
-            e.order = slot
+        # A table is read as one block. Reusing the slots its cells held was only
+        # safe while those slots were contiguous: when column detection splits the
+        # table, the page order walks the left cells, then whatever follows the
+        # table in that column, then the right cells, and a line printed under the
+        # table ("Still stuck? Email support…") was read between two of its rows.
+        members = {e.id for e in seq}
+        first = min(e.order for e in seq)
+        others = sorted((e for e in elements
+                         if e.id not in members and e.role != "Artifact"),
+                        key=lambda e: e.order)
+        before = [e for e in others if e.order < first]
+        after = [e for e in others if e.order >= first]
+        for i, e in enumerate(before + seq + after):
+            e.order = i
 
 
 def _demote_table_cells(elements, tables):

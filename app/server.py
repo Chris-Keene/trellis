@@ -21,7 +21,7 @@ import pymupdf
 
 from . import assist, edits
 from .analyse import analyse, normalise_headings
-from .checks import review, summary
+from .checks import review, summary, untaggable
 from .model import ALL_ROLES, ROLE_GROUPS, DocModel
 from .tagger import build
 
@@ -348,6 +348,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"assist": assist.detect()})
                 if act == "progress":
                     return self._json({"progress": dict(PROGRESS)})
+                if act == "signin":
+                    try:
+                        return self._json({"assist": assist.start_sign_in()})
+                    except assist.Unavailable as exc:
+                        return self._json({"error": str(exc)}, 503)
                 with LOCK:
                     if data.get("doc"):
                         STATE["model"] = DocModel.from_json(data["doc"])
@@ -361,6 +366,7 @@ class Handler(BaseHTTPRequestHandler):
                         out["drafted"] = n
                         if stopped:
                             out["stopped"] = stopped
+                            out["signed_out"] = assist.is_sign_in_problem(stopped)
                         return self._json(out)
                     if act == "order":
                         return self._json(
@@ -368,7 +374,9 @@ class Handler(BaseHTTPRequestHandler):
                              "problems": _review_order(model, data.get("page", 0))})
                 except assist.Unavailable as exc:
                     PROGRESS.update(active=False, label="")
-                    return self._json({"error": str(exc)}, 503)
+                    return self._json({"error": str(exc),
+                                       "signed_out": assist.is_sign_in_problem(exc)},
+                                      503)
                 return self._json({"error": f"Unknown action {act!r}."}, 400)
 
             if u.path == "/api/export":
@@ -420,10 +428,15 @@ class Handler(BaseHTTPRequestHandler):
             out = os.path.join(base, default_name)
         if not out.lower().endswith(".pdf"):
             out += ".pdf"
+        # Named rather than counted, and reported with the result, because the
+        # conformance check passes a file that has quietly lost a heading.
+        lost = [{"id": e.id, "page": e.page, "role": e.role, "text": e.text[:80]}
+                for e in untaggable(model)]
         build(model, out)
         STATE["last_out"] = out
         return self._json({"out": out, "verapdf": verapdf_report(out),
                            "extraction": extraction_ok(out),
+                           "untagged": lost,
                            "summary": summary(model)})
 
 

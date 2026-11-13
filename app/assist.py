@@ -21,6 +21,7 @@ offered and nothing else changes.
 import glob
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -35,6 +36,76 @@ _CLI_TIMEOUT = 120
 
 class Unavailable(Exception):
     """No usable route to Claude, with a line the user can act on."""
+
+
+class SignedOut(Unavailable):
+    """Claude Code is here, but its sign-in is missing or has expired."""
+
+
+SIGNED_OUT_MESSAGE = ("Your Claude Code sign-in has expired. Use Sign in to Claude "
+                      "to sign in again, then try again.")
+
+
+def is_sign_in_problem(problem):
+    """Whether an error, or the message a stopped run kept, needs a fresh sign-in.
+
+    A stopped draft run hands back only its message, so the message is matched as
+    well as the type. Both come from SignedOut, so neither is a guess at wording.
+    """
+    return isinstance(problem, SignedOut) or str(problem) == SIGNED_OUT_MESSAGE
+
+
+def _sign_in_script(exe):
+    """A Terminal script that runs Claude Code's own sign-in and then tidies up."""
+    # Deleting itself first is safe: the shell keeps reading the open file, and
+    # the script is gone even if the window is closed half way through.
+    return f"""#!/bin/sh
+rm -f "$0"
+clear
+echo "Signing Claude Code in, for Trellis."
+echo "Your browser will open. Sign in there, then go back to Trellis:"
+echo "it notices by itself once you are signed in."
+echo
+{shlex.quote(exe)} auth login
+code=$?
+echo
+if [ "$code" -eq 0 ]; then
+  echo "Done. You can close this window."
+else
+  echo "Sign-in did not finish. Close this window and try again from Trellis."
+fi
+"""
+
+
+def start_sign_in():
+    """Open Claude Code's sign-in in a Terminal window.
+
+    The sign-in is the person's own: a browser page, possibly SSO or a code to
+    paste, which only a real terminal can host. Opening a `.command` file needs no
+    permission to control Terminal, unlike scripting it with AppleScript, and it
+    runs in a fresh login environment rather than this app's.
+    """
+    exe = _claude_exe()
+    if not exe:
+        raise Unavailable("Claude Code is not installed on this Mac.")
+    fd, path = tempfile.mkstemp(prefix="trellis-sign-in-", suffix=".command")
+    with os.fdopen(fd, "w") as fh:
+        fh.write(_sign_in_script(exe))
+    os.chmod(path, 0o700)
+    try:
+        proc = subprocess.run(["open", path], capture_output=True, text=True,
+                              timeout=10)
+        ok = proc.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        ok = False
+    if not ok:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise Unavailable("Trellis could not open Terminal. Open it yourself, run "
+                          "claude auth login, then use Check again.")
+    return {"opened": True}
 
 
 # Where Claude Code installs itself. A .app launched from the Dock inherits the
@@ -156,8 +227,9 @@ def detect():
         if api and api["route"]:
             return api
         return {"route": None, "detail": cli, "signed_out": True,
-                "label": "Claude Code is installed but not signed in. Open "
-                         "Terminal, run claude, sign in, then check again."}
+                "label": "Claude Code is installed but not signed in. Use the "
+                         "button here to sign in, or run claude auth login in "
+                         "Terminal, then check again."}
     return _api_route() or {
         "route": None, "detail": "",
         "label": "Nothing available. Install Claude Code, or set an "
@@ -185,8 +257,7 @@ def _run_cli(prompt, model, cwd):
         msg = str(payload.get("result") or "").strip()
         # The common one by far, and it has a one-line fix worth naming.
         if "authenticate" in msg.lower() or "oauth" in msg.lower():
-            raise Unavailable("Your Claude Code sign-in has expired. Open a "
-                              "terminal, run `claude`, sign in, and try again.")
+            raise SignedOut(SIGNED_OUT_MESSAGE)
         raise Unavailable(msg or "Claude Code reported an error.")
     return str(payload.get("result") or "").strip()
 

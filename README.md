@@ -36,7 +36,7 @@ Measured on ten real Google Slides exports (1 to 20 pages): all ten reach
 For handing out to non-technical people, see **[INSTALL.md](INSTALL.md)**, which
 covers the Gatekeeper first-launch warning step by step. Every
 [release](https://github.com/Chris-Keene/trellis/releases) carries the zip
-(`Trellis-1.23.0.zip` for this version) and both PDF guides.
+(`Trellis-1.24.0.zip` for this version) and both PDF guides.
 
 ## Using it
 
@@ -68,12 +68,15 @@ two buttons appear: **Draft the missing descriptions** on the Images step, and
 **Check this page's reading order** on the Structure step. It runs on your own
 Claude Code account; there is no key to paste.
 
-1. Install Claude Code, then run `claude` once in Terminal and sign in. Trellis calls
-   that terminal command, which keeps its own sign-in, so do this even if you use
-   Claude in the desktop app or a browser.
+1. Install Claude Code. Trellis calls its terminal command, which keeps its own
+   sign-in, separate from Claude in the desktop app or a browser.
 2. Quit and reopen Trellis. It looks for Claude Code at launch, in the places the
    installer, Homebrew and nvm put it (`app/assist.py`), because an app started from
    the Dock does not see your shell's `PATH`.
+3. If it says Claude Code is not signed in, press **Sign in to Claude**. That opens a
+   Terminal window running `claude auth login` (written as a `.command` file and
+   `open`ed, so Trellis needs no permission to control Terminal), and Trellis checks
+   every three seconds for five minutes and turns the switch on by itself.
 
 What it sends, and only when you press a button: for a description, a crop of that
 one image plus up to 600 characters of its page's text; for reading order, that
@@ -83,10 +86,12 @@ checked them. The switch is never remembered between launches.
 
 At launch it also asks `claude auth status --json` whether that command is signed in
 (local, free, about a third of a second). Signed out, there is no switch: the first
-step says Claude Code is here but not signed in, with a **Check again** button. An
-answer it cannot read (an older Claude Code, or Bedrock and the like, which sign in
-elsewhere) gets the benefit of the doubt, and a sign-in that lapses later still
-surfaces on first use. A run that stops part way keeps the drafts it already made.
+step says Claude Code is here but not signed in, with **Sign in to Claude** and
+**Check again** buttons. An answer it cannot read (an older Claude Code, or Bedrock
+and the like, which sign in elsewhere) gets the benefit of the doubt. A sign-in that
+lapses later surfaces on first use: the switch goes off and the sign-in panel takes
+the place of the button that was pressed. A run that stops part way keeps the drafts
+it already made.
 
 ## Native window, and why it is shaped this way
 
@@ -197,7 +202,7 @@ Needs `pyinstaller` in the venv. Output lands in `build/dist/`. The release zip
 is made with `ditto`, which keeps the code signature intact:
 
 ```bash
-ditto -c -k --sequesterRsrc --keepParent "build/dist/Trellis.app" dist/Trellis-1.23.0.zip
+ditto -c -k --sequesterRsrc --keepParent "build/dist/Trellis.app" dist/Trellis-1.24.0.zip
 ./build/export_docs.sh      # the two PDF guides, into dist/ beside it
 ```
 
@@ -269,8 +274,8 @@ Two fixtures work the same way. `tests/slides-6page.pdf` and
 `tests/slides-1page.pdf` are real exports if you drop them in; without them the
 suite builds a deck of the same shape and carries on.
 
-Exits non-zero on failure. A full run is 30 groups and 454 checks without the
-corpus (1.23.0), from round-trip, edge cases, fonts and nested text through to
+Exits non-zero on failure. A full run is 32 groups and 484 checks without the
+corpus (1.24.0), from round-trip, edge cases, fonts and nested text through to
 provenance, error messages and the HTTP API, plus 15 more with `--native-ui`.
 
 Two invariants are worth calling out, because they are what the suite is really
